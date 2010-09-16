@@ -237,7 +237,7 @@ module ActiveRecord #:nodoc:
       def execute_structure_dump(string)
         string.split(STATEMENT_TOKEN).each do |ddl|
           ddl.chop! if ddl.last == ";"
-          puts(ddl) unless ddl.blank?
+          execute(ddl) unless ddl.blank?
         end
       end
 
