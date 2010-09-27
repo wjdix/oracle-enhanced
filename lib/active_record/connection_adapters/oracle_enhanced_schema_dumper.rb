@@ -42,7 +42,6 @@ module ActiveRecord #:nodoc:
           next if ignore_table? tbl
           foreign_keys(tbl, stream)
         end
-        
         # add synonyms in local schema
         synonyms(stream)
       end
