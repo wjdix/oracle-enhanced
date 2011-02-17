@@ -331,6 +331,20 @@ describe "OracleEnhancedAdapter integer type detection based on column names" do
       @employee2.is_manager.class.should == Fixnum
     end
 
+    context "when emulate_booleans_from_strings is true" do
+      before(:all) do
+        ActiveRecord::ConnectionAdapters::OracleEnhancedAdapter.emulate_booleans_from_strings = true
+      end
+      after(:all) do
+        ActiveRecord::ConnectionAdapters::OracleEnhancedAdapter.emulate_booleans_from_strings = false
+      end
+      it "should convert false to 0 before writing to database" do
+        lambda{create_employee2}.should_not raise_error ActiveRecord::StatementInvalid
+        @employee2.is_manager = false
+        lambda{@employee.save!}.should_not raise_error ActiveRecord::StatementInvalid
+      end
+    end
+
   end
 
 end
@@ -357,7 +371,8 @@ describe "OracleEnhancedAdapter boolean type detection based on string column ty
         has_phone     VARCHAR2(1) DEFAULT 'Y',
         active_flag   VARCHAR2(2),
         manager_yn    VARCHAR2(3) DEFAULT 'N',
-        test_boolean  VARCHAR2(3)
+        test_boolean  VARCHAR2(3),
+        test_numeric_boolean NUMBER(1,0)
       )
     SQL
     @conn.execute <<-SQL

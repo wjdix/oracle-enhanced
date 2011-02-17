@@ -402,6 +402,12 @@ module ActiveRecord
             # as migrations pass ColumnDefinition object to this method.
             # Check if instance variable is defined to avoid warnings about accessing undefined instance variable.
             column.instance_variable_defined?('@nchar') && column.instance_variable_get('@nchar') ? 'N' << super : super
+          when :boolean
+            if column.sql_type.include?("NUMBER(1")
+              value ? "1" : "0"
+            else
+              super
+            end
           else
             super
           end
