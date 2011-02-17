@@ -1,4 +1,5 @@
-require File.expand_path(File.dirname(__FILE__) + '/../../spec_helper')
+# encoding: utf-8
+require 'spec_helper'
 
 describe "OracleEnhancedAdapter date type detection based on column names" do
   before(:all) do
@@ -106,6 +107,7 @@ describe "OracleEnhancedAdapter date type detection based on column names" do
       # @employee.destroy if @employee
       Object.send(:remove_const, "TestEmployee")
       @conn.clear_types_for_columns
+      ActiveRecord::Base.clear_cache! if ActiveRecord::Base.respond_to?(:"clear_cache!")
     end
 
     it "should return Time value from DATE column if emulate_dates_by_column_name is false" do
@@ -265,6 +267,7 @@ describe "OracleEnhancedAdapter integer type detection based on column names" do
       Object.send(:remove_const, "Test2Employee")
       @conn.clear_types_for_columns
       ActiveRecord::ConnectionAdapters::OracleEnhancedAdapter.emulate_booleans = true
+      ActiveRecord::Base.clear_cache! if ActiveRecord::Base.respond_to?(:"clear_cache!")
     end
     
     def create_employee2
@@ -444,6 +447,7 @@ describe "OracleEnhancedAdapter boolean type detection based on string column ty
     after(:each) do
       Object.send(:remove_const, "Test3Employee")
       @conn.clear_types_for_columns
+      ActiveRecord::Base.clear_cache! if ActiveRecord::Base.respond_to?(:"clear_cache!")
     end
     
     def create_employee3(params={})
@@ -563,6 +567,7 @@ describe "OracleEnhancedAdapter timestamp with timezone support" do
 
     after(:all) do
       Object.send(:remove_const, "TestEmployee")
+      ActiveRecord::Base.clear_cache! if ActiveRecord::Base.respond_to?(:"clear_cache!")
     end
 
     it "should return Time value from TIMESTAMP columns" do
@@ -646,6 +651,7 @@ describe "OracleEnhancedAdapter date and timestamp with different NLS date forma
 
   after(:each) do
     Object.send(:remove_const, "TestEmployee")    
+    ActiveRecord::Base.clear_cache! if ActiveRecord::Base.respond_to?(:"clear_cache!")
   end
   
   def create_test_employee
@@ -741,6 +747,7 @@ describe "OracleEnhancedAdapter assign string to :date and :datetime columns" do
     Object.send(:remove_const, "TestEmployee")
     @conn.execute "DROP TABLE test_employees"
     @conn.execute "DROP SEQUENCE test_employees_seq"
+    ActiveRecord::Base.clear_cache! if ActiveRecord::Base.respond_to?(:"clear_cache!")
   end
 
   before(:each) do
@@ -861,7 +868,7 @@ describe "OracleEnhancedAdapter handling of CLOB columns" do
     @conn = ActiveRecord::Base.connection
     @conn.execute <<-SQL
       CREATE TABLE test_employees (
-        employee_id   NUMBER(6,0) PRIMARY KEY,
+        id            NUMBER(6,0) PRIMARY KEY,
         first_name    VARCHAR2(20),
         last_name     VARCHAR2(25),
         comments      CLOB
@@ -871,28 +878,39 @@ describe "OracleEnhancedAdapter handling of CLOB columns" do
       CREATE SEQUENCE test_employees_seq  MINVALUE 1
         INCREMENT BY 1 CACHE 20 NOORDER NOCYCLE
     SQL
+    @conn.execute <<-SQL
+      CREATE TABLE test2_employees (
+        id            NUMBER(6,0) PRIMARY KEY,
+        first_name    VARCHAR2(20),
+        last_name     VARCHAR2(25),
+        comments      CLOB
+      )
+    SQL
+    @conn.execute <<-SQL
+      CREATE SEQUENCE test2_employees_seq  MINVALUE 1
+        INCREMENT BY 1 CACHE 20 NOORDER NOCYCLE
+    SQL
     @char_data = (0..127).to_a.pack("C*") * 800
     @char_data2 = ((1..127).to_a.pack("C*") + "\0") * 800
-  end
-  
-  after(:all) do
-    @conn.execute "DROP TABLE test_employees"
-    @conn.execute "DROP SEQUENCE test_employees_seq"
-  end
 
-  before(:each) do
-    class ::TestEmployee < ActiveRecord::Base
-      set_primary_key :employee_id
+    class ::TestEmployee < ActiveRecord::Base; end
+    class ::Test2Employee < ActiveRecord::Base
+      serialize :comments
     end
   end
 
-  after(:each) do
+  after(:all) do
+    @conn.execute "DROP TABLE test_employees"
+    @conn.execute "DROP SEQUENCE test_employees_seq"
+    @conn.execute "DROP TABLE test2_employees"
+    @conn.execute "DROP SEQUENCE test2_employees_seq"
     Object.send(:remove_const, "TestEmployee")
+    Object.send(:remove_const, "Test2Employee")
+    ActiveRecord::Base.clear_cache! if ActiveRecord::Base.respond_to?(:"clear_cache!")
   end
 
   it "should create record without CLOB data when attribute is serialized" do
-    TestEmployee.serialize :comments
-    @employee = TestEmployee.create!(
+    @employee = Test2Employee.create!(
       :first_name => "First",
       :last_name => "Last"
     )
@@ -1028,6 +1046,7 @@ describe "OracleEnhancedAdapter handling of BLOB columns" do
   
   after(:each) do
     Object.send(:remove_const, "TestEmployee")
+    ActiveRecord::Base.clear_cache! if ActiveRecord::Base.respond_to?(:"clear_cache!")
   end
   
   it "should create record with BLOB data" do
@@ -1119,3 +1138,63 @@ describe "OracleEnhancedAdapter handling of BLOB columns" do
   end
 end
 
+describe "OracleEnhancedAdapter quoting of NCHAR and NVARCHAR2 columns" do
+  before(:all) do
+    ActiveRecord::Base.establish_connection(CONNECTION_PARAMS)
+    @conn = ActiveRecord::Base.connection
+    @conn.execute <<-SQL
+      CREATE TABLE test_items (
+        id                  NUMBER(6,0) PRIMARY KEY,
+        nchar_column        NCHAR(20),
+        nvarchar2_column    NVARCHAR2(20),
+        char_column         CHAR(20),
+        varchar2_column     VARCHAR2(20)
+      )
+    SQL
+    @conn.execute "CREATE SEQUENCE test_items_seq"
+  end
+
+  after(:all) do
+    @conn.execute "DROP TABLE test_items"
+    @conn.execute "DROP SEQUENCE test_items_seq"
+  end
+
+  before(:each) do
+    class ::TestItem < ActiveRecord::Base
+    end
+  end
+
+  after(:each) do
+    Object.send(:remove_const, "TestItem")
+    ActiveRecord::Base.clear_cache! if ActiveRecord::Base.respond_to?(:"clear_cache!")
+  end
+
+  it "should set nchar instance variable" do
+    columns = @conn.columns('test_items')
+    %w(nchar_column nvarchar2_column char_column varchar2_column).each do |col|
+      column = columns.detect{|c| c.name == col}
+      column.type.should == :string
+      column.nchar.should == (col[0,1] == 'n' ? true : nil)
+    end
+  end
+
+  it "should quote with N prefix" do
+    columns = @conn.columns('test_items')
+    %w(nchar_column nvarchar2_column char_column varchar2_column).each do |col|
+      column = columns.detect{|c| c.name == col}
+      @conn.quote('abc', column).should == (column.nchar ? "N'abc'" : "'abc'")
+      @conn.quote(nil, column).should == 'NULL'
+    end
+  end
+
+  it "should create record" do
+    nchar_data = 'āčē'
+    item = TestItem.create(
+      :nchar_column => nchar_data,
+      :nvarchar2_column => nchar_data
+    ).reload
+    item.nchar_column.should == nchar_data + ' '*17
+    item.nvarchar2_column.should == nchar_data
+  end
+
+end

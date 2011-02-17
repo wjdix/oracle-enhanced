@@ -1,4 +1,4 @@
-require File.expand_path(File.dirname(__FILE__) + '/../../spec_helper')
+require 'spec_helper'
 
 describe "OracleEnhancedAdapter establish connection" do
 
@@ -39,11 +39,11 @@ describe "OracleEnhancedAdapter" do
 
   before(:all) do
     ActiveRecord::Base.establish_connection(CONNECTION_PARAMS)
-    @conn = ActiveRecord::Base.connection
   end
   
   describe "database session store" do
     before(:all) do
+      @conn = ActiveRecord::Base.connection
       @conn.execute <<-SQL
         CREATE TABLE sessions (
           id          NUMBER(38,0) NOT NULL,
@@ -111,6 +111,7 @@ describe "OracleEnhancedAdapter" do
 
   describe "ignore specified table columns" do
     before(:all) do
+      @conn = ActiveRecord::Base.connection
       @conn.execute <<-SQL
         CREATE TABLE test_employees (
           id            NUMBER PRIMARY KEY,
@@ -141,6 +142,7 @@ describe "OracleEnhancedAdapter" do
     after(:each) do
       Object.send(:remove_const, "TestEmployee")
       ActiveRecord::Base.connection.clear_ignored_table_columns
+      ActiveRecord::Base.clear_cache! if ActiveRecord::Base.respond_to?(:"clear_cache!")
     end
 
     it "should ignore specified table columns" do
@@ -178,6 +180,7 @@ describe "OracleEnhancedAdapter" do
 
   describe "cache table columns" do
     before(:all) do
+      @conn = ActiveRecord::Base.connection
       @conn.execute "DROP TABLE test_employees" rescue nil
       @conn.execute <<-SQL
         CREATE TABLE test_employees (
@@ -198,10 +201,12 @@ describe "OracleEnhancedAdapter" do
     end
 
     after(:all) do
+      @conn = ActiveRecord::Base.connection
       Object.send(:remove_const, "TestEmployee")
       Object.send(:remove_const, "TestEmployee2")
       @conn.execute "DROP TABLE test_employees"
       ActiveRecord::ConnectionAdapters::OracleEnhancedAdapter.cache_columns = nil
+      ActiveRecord::Base.clear_cache! if ActiveRecord::Base.respond_to?(:"clear_cache!")
     end
 
     before(:each) do
@@ -290,6 +295,7 @@ describe "OracleEnhancedAdapter" do
   describe "without composite_primary_keys" do
 
     before(:all) do
+      @conn = ActiveRecord::Base.connection
       @conn.execute "DROP TABLE test_employees" rescue nil
       @conn.execute <<-SQL
         CREATE TABLE test_employees (
@@ -306,6 +312,7 @@ describe "OracleEnhancedAdapter" do
     after(:all) do
       Object.send(:remove_const, "TestEmployee")
       @conn.execute "DROP TABLE test_employees"
+      ActiveRecord::Base.clear_cache! if ActiveRecord::Base.respond_to?(:"clear_cache!")
     end
 
     it "should tell ActiveRecord that count distinct is supported" do
@@ -338,6 +345,7 @@ describe "OracleEnhancedAdapter" do
       end
       Object.send(:remove_const, "TestReservedWord")
       ActiveRecord::Base.table_name_prefix = nil
+      ActiveRecord::Base.clear_cache! if ActiveRecord::Base.respond_to?(:"clear_cache!")
     end
 
     before(:each) do
@@ -452,6 +460,10 @@ describe "OracleEnhancedAdapter" do
       end
     end
 
+    before(:all) do
+      @conn = ActiveRecord::Base.connection
+    end
+
     after(:each) do
       ActiveRecord::Schema.define do
         suppress_messages do
@@ -491,6 +503,7 @@ describe "OracleEnhancedAdapter" do
 
   describe "access table over database link" do
     before(:all) do
+      @conn = ActiveRecord::Base.connection
       @db_link = "db_link"
       @sys_conn = ActiveRecord::Base.oracle_enhanced_connection(SYSTEM_CONNECTION_PARAMS)
       @sys_conn.drop_table :test_posts rescue nil
@@ -518,6 +531,7 @@ describe "OracleEnhancedAdapter" do
       @conn.execute "DROP DATABASE LINK #{@db_link}" rescue nil
       @sys_conn.drop_table :test_posts rescue nil
       Object.send(:remove_const, "TestPost") rescue nil
+      ActiveRecord::Base.clear_cache! if ActiveRecord::Base.respond_to?(:"clear_cache!")
     end
 
     it "should verify database link" do
@@ -537,6 +551,10 @@ describe "OracleEnhancedAdapter" do
   end
 
   describe "session information" do
+    before(:all) do
+      @conn = ActiveRecord::Base.connection
+    end
+
     it "should get current database name" do
       # get database name if using //host:port/database connection string
       database_name = CONNECTION_PARAMS[:database].split('/').last
@@ -549,7 +567,10 @@ describe "OracleEnhancedAdapter" do
   end
 
   describe "temporary tables" do
-    
+    before(:all) do
+      @conn = ActiveRecord::Base.connection
+    end
+
     after(:each) do
       @conn.drop_table :foos rescue nil
     end
@@ -565,4 +586,49 @@ describe "OracleEnhancedAdapter" do
       @conn.temporary_table?("foos").should be_true
     end
   end
+
+  describe "eager loading" do
+    before(:all) do
+      schema_define do
+        create_table :test_posts do |t|
+          t.string      :title
+        end
+        create_table :test_comments do |t|
+          t.integer     :test_post_id
+          t.string      :description
+        end
+        add_index :test_comments, :test_post_id
+      end
+      class ::TestPost < ActiveRecord::Base
+        has_many :test_comments
+      end
+      class ::TestComment < ActiveRecord::Base
+        belongs_to :test_post
+      end
+      @ids = (1..1010).to_a
+      TestPost.transaction do
+        @ids.each do |id|
+          TestPost.create!(:id => id, :title => "Title #{id}")
+          TestComment.create!(:test_post_id => id, :description => "Description #{id}")
+        end
+      end
+    end
+
+    after(:all) do
+      schema_define do
+        drop_table :test_comments
+        drop_table :test_posts
+      end
+      Object.send(:remove_const, "TestPost")
+      Object.send(:remove_const, "TestComment")
+      ActiveRecord::Base.clear_cache! if ActiveRecord::Base.respond_to?(:"clear_cache!")
+    end
+
+    it "should load included association with more than 1000 records" do
+      posts = TestPost.includes(:test_comments).all
+      posts.size.should == @ids.size
+    end
+
+  end if ENV['RAILS_GEM_VERSION'] >= '3.1'
+
 end

@@ -77,7 +77,7 @@ module ActiveRecord
       def exec(sql, *bindvars, &block)
         @raw_connection.exec(sql, *bindvars, &block)
       end
-      
+
       def returning_clause(quoted_pk)
         " RETURNING #{quoted_pk} INTO :insert_id"
       end
@@ -91,6 +91,42 @@ module ActiveRecord
         cursor[':insert_id']
       ensure
         cursor.close rescue nil
+      end
+
+      def prepare(sql)
+        Cursor.new(self, @raw_connection.parse(sql))
+      end
+
+      class Cursor
+        def initialize(connection, raw_cursor)
+          @connection = connection
+          @raw_cursor = raw_cursor
+        end
+
+        def bind_param(position, value)
+          @raw_cursor.bind_param(position, value)
+        end
+
+        def exec
+          @raw_cursor.exec
+        end
+
+        def get_col_names
+          @raw_cursor.get_col_names
+        end
+
+        def fetch(options={})
+          if row = @raw_cursor.fetch
+            get_lob_value = options[:get_lob_value]
+            row.map do |col|
+              @connection.typecast_result_value(col, get_lob_value)
+            end
+          end
+        end
+
+        def close
+          @raw_cursor.close
+        end
       end
 
       def select(sql, name = nil, return_column_names = false)
@@ -146,8 +182,6 @@ module ActiveRecord
         end
       end
 
-      private
-
       def typecast_result_value(value, get_lob_value)
         case value
         when Fixnum, Bignum
@@ -181,7 +215,9 @@ module ActiveRecord
           value
         end
       end
-      
+
+      private
+
       def date_without_time?(value)
         case value
         when OraDate
@@ -215,41 +251,44 @@ module ActiveRecord
     # configure an Oracle/OCI connection.
     class OracleEnhancedOCIFactory #:nodoc:
       def self.new_connection(config)
-        username, password, database = config[:username], config[:password], config[:database]
+        # to_s needed if username, password or database is specified as number in database.yml file
+        username = config[:username] && config[:username].to_s
+        password = config[:password] && config[:password].to_s
+        database = config[:database] && config[:database].to_s
         host, port = config[:host], config[:port]
         privilege = config[:privilege] && config[:privilege].to_sym
         async = config[:allow_concurrency]
         prefetch_rows = config[:prefetch_rows] || 100
         cursor_sharing = config[:cursor_sharing] || 'force'
-        # by default VARCHAR2 column size will be interpreted as max number of characters (and not bytes)
-        nls_length_semantics = config[:nls_length_semantics] || 'CHAR'
         # get session time_zone from configuration or from TZ environment variable
         time_zone = config[:time_zone] || ENV['TZ']
 
-
-        # connection using TNS alias
-        connection_string = if database && !host && ENV['TNS_ADMIN']
-          database
-        # database parameter includes host or TNS connection string
-        elsif database =~ %r{[/(]}
-          database
         # connection using host, port and database name
-        else
+        connection_string = if host || port
           host ||= 'localhost'
           host = "[#{host}]" if host =~ /^[^\[].*:/  # IPv6
           port ||= 1521
           "//#{host}:#{port}/#{database}"
+        # if no host is specified then assume that
+        # database parameter is TNS alias or TNS connection string
+        else
+          database
         end
 
         conn = OCI8.new username, password, connection_string, privilege
-        conn.exec %q{alter session set nls_date_format = 'YYYY-MM-DD HH24:MI:SS'}
-        conn.exec %q{alter session set nls_timestamp_format = 'YYYY-MM-DD HH24:MI:SS:FF6'} rescue nil
         conn.autocommit = true
         conn.non_blocking = true if async
         conn.prefetch_rows = prefetch_rows
         conn.exec "alter session set cursor_sharing = #{cursor_sharing}" rescue nil
-        conn.exec "alter session set nls_length_semantics = '#{nls_length_semantics}'"
         conn.exec "alter session set time_zone = '#{time_zone}'" unless time_zone.blank?
+
+        # Initialize NLS parameters
+        OracleEnhancedAdapter::DEFAULT_NLS_PARAMETERS.each do |key, default_value|
+          value = config[key] || ENV[key.to_s.upcase] || default_value
+          if value
+            conn.exec "alter session set #{key} = '#{value}'"
+          end
+        end
         conn
       end
     end

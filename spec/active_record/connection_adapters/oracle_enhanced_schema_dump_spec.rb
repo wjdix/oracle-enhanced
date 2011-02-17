@@ -1,4 +1,4 @@
-require File.expand_path(File.dirname(__FILE__) + '/../../spec_helper')
+require 'spec_helper'
 
 describe "OracleEnhancedAdapter schema dump" do
   include SchemaSpecHelper
@@ -231,7 +231,7 @@ describe "OracleEnhancedAdapter schema dump" do
     it "should include foreign keys following all tables" do
       # if foreign keys preceed declaration of all tables
       # it can cause problems when using db:test rake tasks
-      schema_define do 
+      schema_define do
         add_foreign_key :test_comments, :test_posts
       end
       dump = standard_dump

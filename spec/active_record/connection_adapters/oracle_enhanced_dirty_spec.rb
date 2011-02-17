@@ -1,4 +1,4 @@
-require File.expand_path(File.dirname(__FILE__) + '/../../spec_helper')
+require 'spec_helper'
 
 if ActiveRecord::Base.instance_methods.include?('changed?')
 
@@ -30,6 +30,7 @@ if ActiveRecord::Base.instance_methods.include?('changed?')
       Object.send(:remove_const, "TestEmployee")
       @conn.execute "DROP TABLE test_employees"
       @conn.execute "DROP SEQUENCE test_employees_seq"
+      ActiveRecord::Base.clear_cache! if ActiveRecord::Base.respond_to?(:"clear_cache!")
     end  
 
     it "should not mark empty string (stored as NULL) as changed when reassigning it" do

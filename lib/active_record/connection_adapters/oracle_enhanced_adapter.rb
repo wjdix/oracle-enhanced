@@ -80,10 +80,32 @@ module ActiveRecord
     # * <tt>:allow_concurrency</tt> - set to "true" if non-blocking mode should be enabled (just for OCI client)
     # * <tt>:prefetch_rows</tt> - how many rows should be fetched at one time to increase performance, defaults to 100
     # * <tt>:cursor_sharing</tt> - cursor sharing mode to minimize amount of unique statements, defaults to "force"
-    # * <tt>:nls_length_semantics</tt> - semantics of size of VARCHAR2 and CHAR columns, defaults to "CHAR"
-    #   (meaning that size specifies number of characters and not bytes)
     # * <tt>:time_zone</tt> - database session time zone
     #   (it is recommended to set it using ENV['TZ'] which will be then also used for database session time zone)
+    # 
+    # Optionals NLS parameters:
+    # 
+    # * <tt>:nls_calendar</tt>
+    # * <tt>:nls_characterset</tt>
+    # * <tt>:nls_comp</tt>
+    # * <tt>:nls_currency</tt>
+    # * <tt>:nls_date_format</tt> - format for :date columns, defaults to <tt>YYYY-MM-DD HH24:MI:SS</tt>
+    # * <tt>:nls_date_language</tt>
+    # * <tt>:nls_dual_currency</tt>
+    # * <tt>:nls_iso_currency</tt>
+    # * <tt>:nls_language</tt>
+    # * <tt>:nls_length_semantics</tt> - semantics of size of VARCHAR2 and CHAR columns, defaults to <tt>CHAR</tt>
+    #   (meaning that size specifies number of characters and not bytes)
+    # * <tt>:nls_nchar_characterset</tt>
+    # * <tt>:nls_nchar_conv_excp</tt>
+    # * <tt>:nls_numeric_characters</tt>
+    # * <tt>:nls_sort</tt>
+    # * <tt>:nls_territory</tt>
+    # * <tt>:nls_timestamp_format</tt> - format for :timestamp columns, defaults to <tt>YYYY-MM-DD HH24:MI:SS:FF6</tt>
+    # * <tt>:nls_timestamp_tz_format</tt>
+    # * <tt>:nls_time_format</tt>
+    # * <tt>:nls_time_tz_format</tt>
+    # 
     class OracleEnhancedAdapter < AbstractAdapter
 
       ##
@@ -203,6 +225,7 @@ module ActiveRecord
       def initialize(connection, logger = nil) #:nodoc:
         super
         @quoted_column_names, @quoted_table_names = {}, {}
+        @statements = {}
         @enable_dbms_output = false
       end
 
@@ -223,6 +246,29 @@ module ActiveRecord
       def supports_savepoints? #:nodoc:
         true
       end
+
+      #:stopdoc:
+      DEFAULT_NLS_PARAMETERS = {
+        :nls_calendar            => nil,
+        :nls_characterset        => nil,
+        :nls_comp                => nil,
+        :nls_currency            => nil,
+        :nls_date_format         => 'YYYY-MM-DD HH24:MI:SS',
+        :nls_date_language       => nil,
+        :nls_dual_currency       => nil,
+        :nls_iso_currency        => nil,
+        :nls_language            => nil,
+        :nls_length_semantics    => 'CHAR',
+        :nls_nchar_characterset  => nil,
+        :nls_nchar_conv_excp     => nil,
+        :nls_numeric_characters  => nil,
+        :nls_sort                => nil,
+        :nls_territory           => nil,
+        :nls_timestamp_format    => 'YYYY-MM-DD HH24:MI:SS:FF6',
+        :nls_timestamp_tz_format => nil,
+        :nls_time_format         => nil,
+        :nls_time_tz_format      => nil
+      }
 
       #:stopdoc:
       NATIVE_DATABASE_TYPES = {
@@ -272,6 +318,13 @@ module ActiveRecord
       def index_name_length
         IDENTIFIER_MAX_LENGTH
       end
+
+      # To avoid ORA-01795: maximum number of expressions in a list is 1000
+      # tell ActiveRecord to limit us to 1000 ids at a time
+      def in_clause_length
+        1000
+      end
+      alias ids_in_list_limit in_clause_length
 
       # QUOTING ==================================================
       #
@@ -343,6 +396,12 @@ module ActiveRecord
           # NLS_DATE_FORMAT independent DATE support
           when :date, :time, :datetime
             quote_date_with_to_date(value)
+          when :string
+            # NCHAR and NVARCHAR2 literals should be quoted with N'...'.
+            # Read directly instance variable as otherwise migrations with table column default values are failing
+            # as migrations pass ColumnDefinition object to this method.
+            # Check if instance variable is defined to avoid warnings about accessing undefined instance variable.
+            column.instance_variable_defined?('@nchar') && column.instance_variable_get('@nchar') ? 'N' << super : super
           else
             super
           end
@@ -409,13 +468,20 @@ module ActiveRecord
 
       # Reconnects to the database.
       def reconnect! #:nodoc:
+        clear_cache!
         @connection.reset!
       rescue OracleEnhancedConnectionException => e
         @logger.warn "#{adapter_name} automatic reconnection failed: #{e.message}" if @logger
       end
 
+      def reset!
+        clear_cache!
+        super
+      end
+
       # Disconnects from the database.
       def disconnect! #:nodoc:
+        clear_cache!
         @connection.logoff rescue nil
       end
 
@@ -425,16 +491,67 @@ module ActiveRecord
 
       # Executes a SQL statement
       def execute(sql, name = nil)
-        # hack to pass additional "with_returning" option without changing argument list
-        log(sql, name) { sql.instance_variable_defined?(:@with_returning) && sql.instance_variable_get(:@with_returning) ?
-          @connection.exec_with_returning(sql) : @connection.exec(sql) }
+        log(sql, name) { @connection.exec(sql) }
+      end
+
+      def substitute_for(column, current_values)
+        Arel.sql(":a#{current_values.length + 1}")
+      end
+
+      def clear_cache!
+        @statements.each_value do |cursor|
+          cursor.close
+        end
+        @statements.clear
+      end
+
+      def exec_query(sql, name = 'SQL', binds = [])
+        log(sql, name, binds) do
+          cursor = nil
+          cached = false
+          if binds.empty?
+            cursor = @connection.prepare(sql)
+          else
+            unless @statements.key? sql
+              @statements[sql] = @connection.prepare(sql)
+            end
+
+            cursor = @statements[sql]
+
+            binds = binds.map do |col, val|
+              col ? col.type_cast(val) : val
+            end
+            binds.each_with_index { |val, i| cursor.bind_param(i + 1, val) }
+            cached = true
+          end
+
+          cursor.exec
+          columns = cursor.get_col_names.map do |col_name|
+            @connection.oracle_downcase(col_name)
+          end
+          rows = []
+          fetch_options = {:get_lob_value => (name != 'Writable Large Object')}
+          while row = cursor.fetch(fetch_options)
+            rows << row
+          end
+          res = ActiveRecord::Result.new(columns, rows)
+          cursor.close unless cached
+          res
+        end
+      end
+
+      def supports_statement_cache?
+        true
       end
 
       # Returns an array of arrays containing the field values.
       # Order is the same as that returned by #columns.
       def select_rows(sql, name = nil)
         # last parameter indicates to return also column list
-        result, columns = select(sql, name, true)
+        result = columns = nil
+        log(sql, name) do
+          result, columns = @connection.select(sql, name, true)
+        end
         result.map{ |v| columns.map{|c| v[c]} }
       end
 
@@ -447,10 +564,10 @@ module ActiveRecord
           return id_value
         end
 
-        sql_with_returning = sql.dup << @connection.returning_clause(quote_column_name(pk))
-        # hack to pass additional "with_returning" option without changing argument list
-        sql_with_returning.instance_variable_set(:@with_returning, true)
-        execute(sql_with_returning, name)
+        sql_with_returning = sql + @connection.returning_clause(quote_column_name(pk))
+        log(sql, name) do
+          @connection.exec_with_returning(sql_with_returning)
+        end
       end
       protected :insert_sql
 
@@ -463,7 +580,8 @@ module ActiveRecord
       def next_sequence_value(sequence_name)
         # if sequence_name is set to :autogenerated then it means that primary key will be populated by trigger
         return nil if sequence_name == AUTOGENERATED_SEQUENCE_NAME
-        select_one("SELECT #{quote_table_name(sequence_name)}.NEXTVAL id FROM dual")['id']
+        # call directly connection method to avoid prepared statement which causes fetching of next sequence value twice
+        @connection.select_value("SELECT #{quote_table_name(sequence_name)}.NEXTVAL FROM dual")
       end
 
       def begin_db_transaction #:nodoc:
@@ -513,7 +631,16 @@ module ActiveRecord
       # Returns true for Oracle adapter (since Oracle requires primary key
       # values to be pre-fetched before insert). See also #next_sequence_value.
       def prefetch_primary_key?(table_name = nil)
-        ! @@do_not_prefetch_primary_key[table_name.to_s]
+        return true if table_name.nil?
+        table_name = table_name.to_s
+        do_not_prefetch = @@do_not_prefetch_primary_key[table_name]
+        if do_not_prefetch.nil?
+          owner, desc_table_name, db_link = @connection.describe(table_name)
+          @@do_not_prefetch_primary_key[table_name] = do_not_prefetch =
+            !has_primary_key?(table_name, owner, desc_table_name, db_link) ||
+            has_primary_key_trigger?(table_name, owner, desc_table_name, db_link)
+        end
+        !do_not_prefetch
       end
 
       # used just in tests to clear prefetch primary key flag for all tables
@@ -533,7 +660,13 @@ module ActiveRecord
       def insert_fixture(fixture, table_name) #:nodoc:
         super
 
-        klass = fixture.class_name.constantize rescue nil
+        if ActiveRecord::Base.pluralize_table_names
+          klass = table_name.singularize.camelize
+        else
+          klass = table_name.camelize
+        end
+
+        klass = klass.constantize rescue nil
         if klass.respond_to?(:ancestors) && klass.ancestors.include?(ActiveRecord::Base)
           write_lobs(table_name, klass, fixture)
         end
@@ -632,13 +765,16 @@ module ActiveRecord
               statement_parameters = nil
               if row['index_type'] == 'DOMAIN' && row['ityp_owner'] == 'CTXSYS' && row['ityp_name'] == 'CONTEXT'
                 procedure_name = default_datastore_procedure(row['index_name'])
-                statement_parameters = select_value(<<-SQL)
-                  SELECT SUBSTR(text,LENGTH('-- add_context_index_parameters ')+1)
+                source = select_values(<<-SQL).join
+                  SELECT text
                   FROM all_source#{db_link}
                   WHERE owner = '#{owner}'
                     AND name = '#{procedure_name.upcase}'
-                    AND text LIKE '-- add_context_index_parameters %'
+                  ORDER BY line
                 SQL
+                if source =~ /-- add_context_index_parameters (.+)\n/
+                  statement_parameters = $1
+                end
               end
               all_schema_indexes << OracleEnhancedIndexDefinition.new(row['table_name'], row['index_name'],
                 row['uniqueness'] == "UNIQUE", row['index_type'] == 'DOMAIN' ? "#{row['ityp_owner']}.#{row['ityp_name']}" : nil,
@@ -738,9 +874,8 @@ module ActiveRecord
 
         (owner, desc_table_name, db_link) = @connection.describe(table_name)
 
-        @@do_not_prefetch_primary_key[table_name] =
-          !has_primary_key?(table_name, owner, desc_table_name, db_link) ||
-          has_primary_key_trigger?(table_name, owner, desc_table_name, db_link)
+        # reset do_not_prefetch_primary_key cache for this table
+        @@do_not_prefetch_primary_key[table_name] = nil
 
         table_cols = <<-SQL
           select column_name as name, data_type as sql_type, data_default, nullable,
@@ -862,9 +997,15 @@ module ActiveRecord
 
         # construct a valid DISTINCT clause, ie. one that includes the ORDER BY columns, using
         # FIRST_VALUE such that the inclusion of these columns doesn't invalidate the DISTINCT
-        order_columns = order_by.split(',').map { |s| s.strip }.reject(&:blank?)
+        order_columns = if order_by.is_a?(String)
+          order_by.split(',').map { |s| s.strip }.reject(&:blank?)
+        else # in latest ActiveRecord versions order_by is already Array
+          order_by
+        end
         order_columns = order_columns.zip((0...order_columns.size).to_a).map do |c, i|
-          "FIRST_VALUE(#{c.split.first}) OVER (PARTITION BY #{columns} ORDER BY #{c}) AS alias_#{i}__"
+          # remove any ASC/DESC modifiers
+          value = c =~ /^(.+)\s+(ASC|DESC)\s*$/i ? $1 : c
+          "FIRST_VALUE(#{value}) OVER (PARTITION BY #{columns} ORDER BY #{c}) AS alias_#{i}__"
         end
         sql = "DISTINCT #{columns}, "
         sql << order_columns * ", "
@@ -873,10 +1014,12 @@ module ActiveRecord
       def temporary_table?(table_name) #:nodoc:
         select_value("select temporary from user_tables where table_name = '#{table_name.upcase}'") == 'Y'
       end
-      
+
       # ORDER BY clause for the passed order option.
-      # 
+      #
       # Uses column aliases as defined by #distinct.
+      #
+      # In Rails 3.x this method is moved to Arel
       def add_order_by_for_association_limiting!(sql, options) #:nodoc:
         return sql if options[:order].blank?
 
@@ -902,9 +1045,13 @@ module ActiveRecord
 
       private
 
-      def select(sql, name = nil, return_column_names = false)
-        log(sql, name) do
-          @connection.select(sql, name, return_column_names)
+      def select(sql, name = nil, binds = [])
+        if ActiveRecord.const_defined?(:Result)
+          exec_query(sql, name, binds).to_a
+        else
+          log(sql, name) do
+            @connection.select(sql, name, false)
+          end
         end
       end
 
@@ -944,8 +1091,12 @@ module ActiveRecord
       end
 
       protected
-      def log(sql, name) #:nodoc:
-        super sql, name
+      def log(sql, name, binds = nil) #:nodoc:
+        if binds
+          super sql, name, binds
+        else
+          super sql, name
+        end
       ensure
         log_dbms_output if dbms_output_enabled?
       end

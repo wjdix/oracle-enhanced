@@ -112,7 +112,7 @@ module ActiveRecord
 
         if Hash === options # legacy support, since this param was a string
           index_type = options[:unique] ? "UNIQUE" : ""
-          index_name = options[:name] || index_name
+          index_name = options[:name].to_s if options.key?(:name)
           tablespace = options[:tablespace] ? " TABLESPACE #{options[:tablespace]}" : ""
         else
           index_type = options
@@ -150,7 +150,7 @@ module ActiveRecord
 
       # returned shortened index name if default is too large
       def index_name(table_name, options) #:nodoc:
-        default_name = super(table_name, options)
+        default_name = super(table_name, options).to_s
         # sometimes options can be String or Array with column names
         options = {} unless options.is_a?(Hash)
         identifier_max_length = options[:identifier_max_length] || index_name_length
@@ -186,7 +186,7 @@ module ActiveRecord
              AND i.table_name = '#{table_name}'
              AND i.index_name = '#{index_name.to_s.upcase}'
         SQL
-        result == 1 ? true : false
+        result == 1
       end
 
       def add_column(table_name, column_name, type, options = {}) #:nodoc:

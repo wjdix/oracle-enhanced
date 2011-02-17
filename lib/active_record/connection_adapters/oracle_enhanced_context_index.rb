@@ -13,6 +13,16 @@ module ActiveRecord
       # Use +contains+ ActiveRecord model instance method to add CONTAINS where condition
       # and order by score of matched results.
       #
+      # Options:
+      #
+      # * <tt>:name</tt>
+      # * <tt>:index_column</tt>
+      # * <tt>:index_column_trigger_on</tt>
+      # * <tt>:tablespace</tt>
+      # * <tt>:sync</tt> - 'MANUAL', 'EVERY "interval-string"' or 'ON COMMIT' (defaults to 'MANUAL').
+      # * <tt>:lexer</tt> - Lexer options (e.g. <tt>:type => 'BASIC_LEXER', :base_letter => true</tt>).
+      # * <tt>:transactional</tt> - When +true+, the CONTAINS operator will process inserted and updated rows.
+      #
       # ===== Examples
       #
       # ====== Creating single column index
@@ -54,6 +64,9 @@ module ActiveRecord
       # ====== Creating index using lexer
       #  add_context_index :posts, :title, :lexer => { :type => 'BASIC_LEXER', :base_letter => true, ... }
       #
+      # ====== Creating transactional index (will reindex changed rows when querying)
+      #  add_context_index :posts, :title, :transactional => true
+      #
       def add_context_index(table_name, column_name, options = {})
         self.all_schema_indexes = nil
         column_names = Array(column_name)
@@ -63,7 +76,7 @@ module ActiveRecord
 
         quoted_column_name = quote_column_name(options[:index_column] || column_names.first)
         if options[:index_column_trigger_on]
-          raise ArgumentError, "Option :index_column should be specified together with :index_column_cource option" \
+          raise ArgumentError, "Option :index_column should be specified together with :index_column_trigger_on option" \
             unless options[:index_column]
           create_index_column_trigger(table_name, index_name, options[:index_column], options[:index_column_trigger_on])
         end
@@ -93,6 +106,9 @@ module ActiveRecord
           create_lexer_preference(lexer_name, lexer_type, lexer_options)
           parameters << "LEXER #{lexer_name}"
         end
+        if options[:transactional]
+          parameters << "TRANSACTIONAL"
+        end
         unless parameters.empty?
           sql << " PARAMETERS ('#{parameters.join(' ')}')"
         end
@@ -119,8 +135,8 @@ module ActiveRecord
 
       def create_datastore_procedure(table_name, procedure_name, column_names, options)
         quoted_table_name = quote_table_name(table_name)
-        select_queries = column_names.select{|c| c.to_s =~ /^SELECT /i}
-        column_names = column_names - select_queries
+        select_queries, column_names = column_names.partition { |c| c.to_s =~ /^\s*SELECT\s+/i }
+        select_queries = select_queries.map { |s| s.strip.gsub(/\s+/, ' ') }
         keys, selected_columns = parse_select_queries(select_queries)
         quoted_column_names = (column_names+keys).map{|col| quote_column_name(col)}
         execute compress_lines(<<-SQL)
